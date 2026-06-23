@@ -18,6 +18,7 @@ This roadmap outlines the planned development phases for the ServCron distribute
 - [x] **Redis Lease Leader Election**: Lock-based leader promotion to avoid duplicate runs across instances.
 - [x] **REST APIs**: Full CRUD operations on jobs + manual run triggers.
 - [x] **OTel Tracing Integration**: Spans emitted on task execution.
+- [x] **GitHub Actions CI Pipeline**: Automated build and test pipeline configuration.
 
 ## Phase 2: Cron Pattern Parsing (Q3 2026)
 - [x] **Standard Cron Syntax**: Integrate native parsing for 5-field cron specifications (e.g. `0 9 * * 1-5` for weekdays at 9 AM).
