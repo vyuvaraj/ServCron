@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +29,15 @@ type Job struct {
 	Status    string    `json:"status"`              // "active", "paused"
 }
 
+type JobAuditLog struct {
+	JobID        string    `json:"job_id"`
+	Timestamp    time.Time `json:"timestamp"`
+	DurationMs   int64     `json:"duration_ms"`
+	StatusCode   int       `json:"status_code,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	ResponseBody string    `json:"response_body,omitempty"`
+}
+
 type Scheduler struct {
 	mu              sync.RWMutex
 	jobs            map[string]*Job
@@ -34,15 +46,166 @@ type Scheduler struct {
 	wg              sync.WaitGroup
 	acquireLockFunc func(jobID string, nextRun time.Time) bool
 	CheckInterval   time.Duration
+	s3Endpoint      string
+	s3Bucket        string
+	s3AuthToken     string
 }
 
 func NewScheduler(acquireLockFunc func(jobID string, nextRun time.Time) bool) *Scheduler {
-	return &Scheduler{
+	endpoint := os.Getenv("SERV_STORE_ENDPOINT")
+	bucket := os.Getenv("SERV_STORE_BUCKET")
+	authToken := os.Getenv("SERV_STORE_AUTH_TOKEN")
+
+	if endpoint == "" || authToken == "" {
+		if raw := os.Getenv("SERVVERSE_DISCOVERY"); raw != "" {
+			var manifest struct {
+				Store     string `json:"store"`
+				AuthToken string `json:"auth_token"`
+			}
+			if json.Unmarshal([]byte(raw), &manifest) == nil {
+				if endpoint == "" && manifest.Store != "" {
+					endpoint = manifest.Store
+				}
+				if authToken == "" && manifest.AuthToken != "" {
+					authToken = manifest.AuthToken
+				}
+			}
+		}
+	}
+	if endpoint == "" {
+		endpoint = "http://localhost:8081"
+	}
+	if bucket == "" {
+		bucket = "serv-cron"
+	}
+	if authToken == "" {
+		authToken = "gateway-secret-token"
+	}
+
+	s := &Scheduler{
 		jobs:            make(map[string]*Job),
 		client:          &http.Client{Timeout: 10 * time.Second},
 		stopChan:        make(chan struct{}),
 		acquireLockFunc: acquireLockFunc,
 		CheckInterval:   1 * time.Second,
+		s3Endpoint:      strings.TrimSuffix(endpoint, "/"),
+		s3Bucket:        bucket,
+		s3AuthToken:     authToken,
+	}
+
+	s.loadJobsFromS3()
+	return s
+}
+
+func (s *Scheduler) ensureBucketExists() {
+	url := fmt.Sprintf("%s/%s", s.s3Endpoint, s.s3Bucket)
+	req, err := http.NewRequest("PUT", url, nil)
+	if err != nil {
+		return
+	}
+	if s.s3AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.s3AuthToken)
+	}
+	resp, err := s.client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+func (s *Scheduler) loadJobsFromS3() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	url := fmt.Sprintf("%s/%s/jobs.json", s.s3Endpoint, s.s3Bucket)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+	if s.s3AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.s3AuthToken)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		var list []*Job
+		if err := json.NewDecoder(resp.Body).Decode(&list); err == nil {
+			for _, j := range list {
+				s.jobs[j.ID] = j
+			}
+			log.Printf("Loaded %d jobs from S3 storage", len(list))
+		}
+	}
+}
+
+func (s *Scheduler) saveJobsToS3() {
+	s.ensureBucketExists()
+
+	s.mu.RLock()
+	list := make([]*Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		list = append(list, j)
+	}
+	s.mu.RUnlock()
+
+	url := fmt.Sprintf("%s/%s/jobs.json", s.s3Endpoint, s.s3Bucket)
+	data, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return
+	}
+
+	req, err := http.NewRequest("PUT", url, bytes.NewReader(data))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.s3AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.s3AuthToken)
+	}
+
+	resp, err := s.client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+func (s *Scheduler) saveAuditLogToS3(jobID string, startTime time.Time, durationMs int64, statusCode int, errStr string, respBody string) {
+	s.ensureBucketExists()
+
+	logEntry := JobAuditLog{
+		JobID:        jobID,
+		Timestamp:    startTime,
+		DurationMs:   durationMs,
+		StatusCode:   statusCode,
+		Error:        errStr,
+		ResponseBody: respBody,
+	}
+
+	data, err := json.MarshalIndent(logEntry, "", "  ")
+	if err != nil {
+		return
+	}
+
+	timestampStr := startTime.UTC().Format("20060102_150405_000")
+	key := fmt.Sprintf("audit/%s_%s.json", jobID, timestampStr)
+	url := fmt.Sprintf("%s/%s/%s", s.s3Endpoint, s.s3Bucket, key)
+
+	req, err := http.NewRequest("PUT", url, bytes.NewReader(data))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.s3AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.s3AuthToken)
+	}
+
+	resp, err := s.client.Do(req)
+	if err == nil {
+		resp.Body.Close()
 	}
 }
 
@@ -58,25 +221,28 @@ func (s *Scheduler) Stop() {
 
 func (s *Scheduler) AddJob(job *Job) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if job.ID == "" {
+		s.mu.Unlock()
 		return fmt.Errorf("job ID cannot be empty")
 	}
 	if job.TargetURL == "" {
+		s.mu.Unlock()
 		return fmt.Errorf("target URL cannot be empty")
 	}
 
-	// Calculate initial NextRun
 	next, err := s.calculateNextRun(job, time.Now())
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	job.NextRun = next
 	job.Status = "active"
 
 	s.jobs[job.ID] = job
+	s.mu.Unlock()
+
 	log.Printf("Job '%s' registered. Next run: %v", job.ID, job.NextRun)
+	go s.saveJobsToS3()
 	return nil
 }
 
@@ -86,7 +252,6 @@ func (s *Scheduler) GetJobs() []*Job {
 
 	list := make([]*Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		// return copies
 		copyJob := *j
 		list = append(list, &copyJob)
 	}
@@ -95,13 +260,14 @@ func (s *Scheduler) GetJobs() []*Job {
 
 func (s *Scheduler) RemoveJob(id string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if _, ok := s.jobs[id]; ok {
 		delete(s.jobs, id)
+		s.mu.Unlock()
 		log.Printf("Job '%s' removed", id)
+		go s.saveJobsToS3()
 		return true
 	}
+	s.mu.Unlock()
 	return false
 }
 
@@ -147,9 +313,7 @@ func (s *Scheduler) checkAndRunJobs() {
 				continue
 			}
 
-			// Attempt to acquire lock for this specific execution slot
 			if s.acquireLockFunc != nil && !s.acquireLockFunc(job.ID, job.NextRun) {
-				// Lock not acquired (another node is running it) — advance NextRun and skip
 				job.NextRun = next
 				continue
 			}
@@ -165,7 +329,6 @@ func (s *Scheduler) checkAndRunJobs() {
 func (s *Scheduler) executeJob(job *Job) {
 	log.Printf("Executing job '%s' -> %s", job.ID, job.TargetURL)
 
-	// Build OTel client tracing span
 	traceID := generateTraceID()
 	spanID := generateSpanID()
 	traceparent := fmt.Sprintf("00-%s-%s-01", traceID, spanID)
@@ -179,29 +342,39 @@ func (s *Scheduler) executeJob(job *Job) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("traceparent", traceparent)
 
-	// Trace span logging to telemetry if enabled
 	span := ServShared.Span{
 		TraceID:   traceID,
 		SpanID:    spanID,
 		Name:      fmt.Sprintf("servcron:TRIGGER %s", job.ID),
-		Kind:      3, // client
+		Kind:      3,
 		StartTime: time.Now().UnixNano(),
 	}
 
+	startTime := time.Now()
 	resp, err := s.client.Do(req)
+	duration := time.Since(startTime).Milliseconds()
+
+	var statusCode int
+	var errStr string
+	var respBody string
 
 	var attrs map[string]interface{}
 	if err != nil {
 		attrs = map[string]interface{}{"error": err.Error()}
+		errStr = err.Error()
 		log.Printf("Execution of job '%s' failed: %v", job.ID, err)
 	} else {
 		defer resp.Body.Close()
+		statusCode = resp.StatusCode
 		attrs = map[string]interface{}{"status_code": resp.StatusCode}
 		log.Printf("Execution of job '%s' completed with status %d", job.ID, resp.StatusCode)
+		
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		respBody = string(bodyBytes)
 	}
 
-	// Export span if telemetry is initialized
 	ServShared.EndSpan(&span, err, attrs)
+	go s.saveAuditLogToS3(job.ID, startTime, duration, statusCode, errStr, respBody)
 }
 
 func (s *Scheduler) calculateNextRun(job *Job, from time.Time) (time.Time, error) {

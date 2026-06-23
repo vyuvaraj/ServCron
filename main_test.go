@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -312,3 +313,96 @@ func TestDynamicLoadBalancing(t *testing.T) {
 		t.Errorf("Executions (%d) do not match lock count (%d)", execs, len(locks))
 	}
 }
+
+func TestS3PersistenceAndAuditLog(t *testing.T) {
+	var gotPutJob, gotPutAudit bool
+	var putAuditData string
+
+	// 1. Start a mock ServStore S3 server
+	s3Mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" {
+			if r.URL.Path == "/serv-cron/jobs.json" {
+				gotPutJob = true
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/serv-cron/audit/") {
+				gotPutAudit = true
+				bodyBytes, _ := io.ReadAll(r.Body)
+				putAuditData = string(bodyBytes)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method == "GET" && r.URL.Path == "/serv-cron/jobs.json" {
+			// Return an empty list of jobs initially
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte("[]"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer s3Mock.Close()
+
+	// 2. Set environment variables to point to mock S3
+	t.Setenv("SERV_STORE_ENDPOINT", s3Mock.URL)
+	t.Setenv("SERV_STORE_BUCKET", "serv-cron")
+	t.Setenv("SERV_STORE_AUTH_TOKEN", "mock-token")
+
+	// 3. Create a scheduler
+	sched := cron.NewScheduler(func(string, time.Time) bool { return true })
+
+	// 4. Add a job -> check that saveJobsToS3 is called
+	job := &cron.Job{
+		ID:        "s3-test-job",
+		Interval:  "1m",
+		TargetURL: "http://localhost:9999/task",
+	}
+	err := sched.AddJob(job)
+	if err != nil {
+		t.Fatalf("Failed to add job: %v", err)
+	}
+
+	// Wait for background go routine saveJobsToS3
+	time.Sleep(100 * time.Millisecond)
+	if !gotPutJob {
+		t.Errorf("Expected job registration to trigger a PUT call to S3 jobs.json")
+	}
+
+	// 5. Trigger job execution -> check that audit log is saved
+	// We'll set up a target server that the job calls
+	targetCallCount := 0
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCallCount++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("api response body"))
+	}))
+	defer targetServer.Close()
+
+	job.TargetURL = targetServer.URL
+	err = sched.TriggerJob("s3-test-job")
+	if err != nil {
+		t.Fatalf("Failed to trigger job: %v", err)
+	}
+
+	// Wait for execution and background saveAuditLogToS3
+	time.Sleep(150 * time.Millisecond)
+
+	if targetCallCount != 1 {
+		t.Errorf("Expected job target server to be called once, got %d", targetCallCount)
+	}
+	if !gotPutAudit {
+		t.Errorf("Expected job execution to trigger a PUT call to S3 audit logs")
+	}
+
+	// Verify content of audit log
+	if !strings.Contains(putAuditData, "s3-test-job") {
+		t.Errorf("Audit log should contain Job ID, got: %s", putAuditData)
+	}
+	if !strings.Contains(putAuditData, "api response body") {
+		t.Errorf("Audit log should contain response body, got: %s", putAuditData)
+	}
+}
+

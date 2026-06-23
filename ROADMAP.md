@@ -25,5 +25,5 @@ This roadmap outlines the planned development phases for the ServCron distribute
 - [x] **Dynamic Load Balancing**: Distribute different jobs across different nodes rather than executing all jobs on a single leader.
 
 ## Phase 3: ServStore Backing (Q4 2026)
-- [ ] **Persistent Job Registry**: Back job state persistence to a `ServStore` S3 bucket, preventing scheduled task losses during server crashes or restarts.
-- [ ] **Job Execution Audit History**: Logs execution logs, status results, and metrics directly to storage.
+- [x] **Persistent Job Registry**: Back job state persistence to a `ServStore` S3 bucket, preventing scheduled task losses during server crashes or restarts.
+- [x] **Job Execution Audit History**: Logs execution logs, status results, and metrics directly to storage.
