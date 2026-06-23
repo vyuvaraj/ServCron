@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,7 @@ import (
 )
 
 func TestSchedulerOperations(t *testing.T) {
-	// Standalone/Mock leader function (always leader)
-	isLeader := func() bool { return true }
-
-	sched := cron.NewScheduler(isLeader)
+	sched := cron.NewScheduler(func(string, time.Time) bool { return true })
 
 	job := &cron.Job{
 		ID:        "job1",
@@ -67,11 +65,11 @@ func TestSchedulerEvictionAndTriggers(t *testing.T) {
 
 	// Leader elector mock: Start as follower (IsLeader=false)
 	var isLeaderFlag int32 = 0
-	isLeader := func() bool {
+	acquireLock := func(jobID string, nextRun time.Time) bool {
 		return atomic.LoadInt32(&isLeaderFlag) == 1
 	}
 
-	sched := cron.NewScheduler(isLeader)
+	sched := cron.NewScheduler(acquireLock)
 	sched.CheckInterval = 50 * time.Millisecond
 	sched.Start()
 	defer sched.Stop()
@@ -106,6 +104,7 @@ func TestSchedulerEvictionAndTriggers(t *testing.T) {
 
 	// Test manual TriggerJob (should work even if scheduler is follower)
 	atomic.StoreInt32(&isLeaderFlag, 0)
+	time.Sleep(150 * time.Millisecond) // Let in-flight requests finish
 	beforeTrigger := atomic.LoadInt64(&callCount)
 
 	err = sched.TriggerJob("test-job")
@@ -114,15 +113,14 @@ func TestSchedulerEvictionAndTriggers(t *testing.T) {
 	}
 
 	// Wait for async task to process
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	if atomic.LoadInt64(&callCount) != beforeTrigger+1 {
 		t.Errorf("Manual trigger should increment executions by 1, got calls before: %d, after: %d", beforeTrigger, atomic.LoadInt64(&callCount))
 	}
 }
 
 func TestServerRESTAPI(t *testing.T) {
-	isLeader := func() bool { return true }
-	sched := cron.NewScheduler(isLeader)
+	sched := cron.NewScheduler(func(string, time.Time) bool { return true })
 	elector := cron.NewLeaderElector("", "lock", 5*time.Second)
 
 	srv := server.NewServer(sched, elector)
@@ -196,7 +194,7 @@ func TestServerRESTAPI(t *testing.T) {
 }
 
 func TestHealthProbeEndpoints(t *testing.T) {
-	sched := cron.NewScheduler(func() bool { return true })
+	sched := cron.NewScheduler(func(string, time.Time) bool { return true })
 	elector := cron.NewLeaderElector("", "lock", 5*time.Second)
 
 	srv := server.NewServer(sched, elector)
@@ -220,5 +218,97 @@ func TestHealthProbeEndpoints(t *testing.T) {
 	data, _ := io.ReadAll(resp.Body)
 	if !bytes.Contains(data, []byte("healthy")) {
 		t.Errorf("Expected health response to contain 'healthy', got: %s", string(data))
+	}
+}
+
+func TestCronSyntaxParsing(t *testing.T) {
+	from := time.Date(2026, 6, 23, 9, 0, 0, 0, time.UTC)
+
+	// Case 1: Standard Cron (Every day at 9:05 AM)
+	next, err := cron.CalculateNextCron("5 9 * * *", from)
+	if err != nil {
+		t.Fatalf("Failed to calculate next cron: %v", err)
+	}
+	expected := time.Date(2026, 6, 23, 9, 5, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("Expected %v, got %v", expected, next)
+	}
+
+	// Case 2: Range & Step (Every 10 minutes between 9:00 and 9:30)
+	next, err = cron.CalculateNextCron("*/10 9 * * *", from)
+	if err != nil {
+		t.Fatalf("Failed: %v", err)
+	}
+	expected = time.Date(2026, 6, 23, 9, 10, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("Expected %v, got %v", expected, next)
+	}
+
+	// Case 3: List (At 9:15 and 9:45)
+	next, err = cron.CalculateNextCron("15,45 9 * * *", from)
+	if err != nil {
+		t.Fatalf("Failed: %v", err)
+	}
+	expected = time.Date(2026, 6, 23, 9, 15, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("Expected %v, got %v", expected, next)
+	}
+}
+
+func TestDynamicLoadBalancing(t *testing.T) {
+	// Mock shared lock store
+	locks := make(map[string]string) // slotKey -> nodeID
+	
+	acquireLockMock := func(nodeID string) func(string, time.Time) bool {
+		return func(jobID string, nextRun time.Time) bool {
+			slotKey := fmt.Sprintf("%s:%d", jobID, nextRun.Unix())
+			if _, exists := locks[slotKey]; exists {
+				return false
+			}
+			locks[slotKey] = nodeID
+			return true
+		}
+	}
+
+	var executions int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&executions, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	// Start two schedulers representing two nodes
+	sched1 := cron.NewScheduler(acquireLockMock("node-1"))
+	sched1.CheckInterval = 50 * time.Millisecond
+	sched1.Start()
+	defer sched1.Stop()
+
+	sched2 := cron.NewScheduler(acquireLockMock("node-2"))
+	sched2.CheckInterval = 50 * time.Millisecond
+	sched2.Start()
+	defer sched2.Stop()
+
+	job := &cron.Job{
+		ID:        "balanced-job",
+		Interval:  "100ms",
+		TargetURL: ts.URL,
+	}
+
+	// Register job on both nodes
+	sched1.AddJob(job)
+	sched2.AddJob(job)
+
+	// Let them run for 300ms
+	time.Sleep(300 * time.Millisecond)
+
+	// Since they compete, only one scheduler should run each execution slot
+	execs := atomic.LoadInt64(&executions)
+	if execs == 0 {
+		t.Errorf("Expected jobs to execute, got 0 executions")
+	}
+
+	// Let's verify that the total executions match the number of unique locks created
+	if int(execs) != len(locks) {
+		t.Errorf("Executions (%d) do not match lock count (%d)", execs, len(locks))
 	}
 }

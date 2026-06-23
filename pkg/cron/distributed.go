@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -126,4 +127,22 @@ func (le *LeaderElector) tryAcquireOrRenew() {
 			le.isLeader = true
 		}
 	}
+}
+
+func (le *LeaderElector) AcquireJobLock(jobID string, nextRun time.Time) bool {
+	if le.redisClient == nil {
+		return true
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	slotKey := fmt.Sprintf("servcron:job:%s:run:%d", jobID, nextRun.Truncate(time.Minute).Unix())
+
+	ok, err := le.redisClient.SetNX(ctx, slotKey, le.nodeID, 5*time.Minute).Result()
+	if err != nil {
+		log.Printf("Node %s: Error acquiring slot lock for job %s: %v", le.nodeID, jobID, err)
+		return false
+	}
+	return ok
 }

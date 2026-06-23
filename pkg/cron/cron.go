@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 type Job struct {
 	ID        string    `json:"id"`
 	Interval  string    `json:"interval,omitempty"`  // duration string e.g. "10s", "1m"
+	Cron      string    `json:"cron,omitempty"`      // standard 5-field cron e.g. "0 9 * * 1-5"
 	TargetURL string    `json:"target_url"`
 	Payload   string    `json:"payload,omitempty"`
 	NextRun   time.Time `json:"next_run"`
@@ -24,22 +27,22 @@ type Job struct {
 }
 
 type Scheduler struct {
-	mu            sync.RWMutex
-	jobs          map[string]*Job
-	client        *http.Client
-	stopChan      chan struct{}
-	wg            sync.WaitGroup
-	isLeaderFunc  func() bool
-	CheckInterval time.Duration
+	mu              sync.RWMutex
+	jobs            map[string]*Job
+	client          *http.Client
+	stopChan        chan struct{}
+	wg              sync.WaitGroup
+	acquireLockFunc func(jobID string, nextRun time.Time) bool
+	CheckInterval   time.Duration
 }
 
-func NewScheduler(isLeaderFunc func() bool) *Scheduler {
+func NewScheduler(acquireLockFunc func(jobID string, nextRun time.Time) bool) *Scheduler {
 	return &Scheduler{
-		jobs:          make(map[string]*Job),
-		client:        &http.Client{Timeout: 10 * time.Second},
-		stopChan:      make(chan struct{}),
-		isLeaderFunc:  isLeaderFunc,
-		CheckInterval: 1 * time.Second,
+		jobs:            make(map[string]*Job),
+		client:          &http.Client{Timeout: 10 * time.Second},
+		stopChan:        make(chan struct{}),
+		acquireLockFunc: acquireLockFunc,
+		CheckInterval:   1 * time.Second,
 	}
 }
 
@@ -131,24 +134,27 @@ func (s *Scheduler) runLoop() {
 }
 
 func (s *Scheduler) checkAndRunJobs() {
-	if !s.isLeaderFunc() {
-		// Only the leader runs scheduled jobs
-		return
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
 	for _, job := range s.jobs {
 		if job.Status == "active" && now.After(job.NextRun) {
-			job.LastRun = now
 			next, err := s.calculateNextRun(job, now)
 			if err != nil {
 				log.Printf("Failed to calculate next run for job %s: %v", job.ID, err)
 				job.Status = "paused"
 				continue
 			}
+
+			// Attempt to acquire lock for this specific execution slot
+			if s.acquireLockFunc != nil && !s.acquireLockFunc(job.ID, job.NextRun) {
+				// Lock not acquired (another node is running it) — advance NextRun and skip
+				job.NextRun = next
+				continue
+			}
+
+			job.LastRun = now
 			job.NextRun = next
 
 			go s.executeJob(job)
@@ -201,8 +207,12 @@ func (s *Scheduler) executeJob(job *Job) {
 }
 
 func (s *Scheduler) calculateNextRun(job *Job, from time.Time) (time.Time, error) {
+	if job.Cron != "" {
+		return CalculateNextCron(job.Cron, from)
+	}
+
 	if job.Interval == "" {
-		return time.Time{}, fmt.Errorf("missing interval configuration")
+		return time.Time{}, fmt.Errorf("missing interval or cron configuration")
 	}
 
 	dur, err := time.ParseDuration(job.Interval)
@@ -211,6 +221,88 @@ func (s *Scheduler) calculateNextRun(job *Job, from time.Time) (time.Time, error
 	}
 
 	return from.Add(dur), nil
+}
+
+func matchField(field string, val int, minVal, maxVal int) bool {
+	if field == "*" {
+		return true
+	}
+	if strings.Contains(field, ",") {
+		parts := strings.Split(field, ",")
+		for _, p := range parts {
+			if matchField(p, val, minVal, maxVal) {
+				return true
+			}
+		}
+		return false
+	}
+	var step int = 1
+	var rangeStr string = field
+	if strings.Contains(field, "/") {
+		parts := strings.Split(field, "/")
+		rangeStr = parts[0]
+		stepVal, err := strconv.Atoi(parts[1])
+		if err == nil {
+			step = stepVal
+		}
+	}
+	var start, end int
+	if rangeStr == "*" {
+		start = minVal
+		end = maxVal
+	} else if strings.Contains(rangeStr, "-") {
+		parts := strings.Split(rangeStr, "-")
+		s, err1 := strconv.Atoi(parts[0])
+		e, err2 := strconv.Atoi(parts[1])
+		if err1 == nil && err2 == nil {
+			start = s
+			end = e
+		}
+	} else {
+		s, err := strconv.Atoi(rangeStr)
+		if err == nil {
+			start = s
+			end = s
+		} else {
+			return false
+		}
+	}
+
+	for i := start; i <= end; i += step {
+		if i == val {
+			return true
+		}
+	}
+	return false
+}
+
+func matchCron(fields []string, t time.Time) bool {
+	if len(fields) != 5 {
+		return false
+	}
+	dowVal := int(t.Weekday())
+	return matchField(fields[0], t.Minute(), 0, 59) &&
+		matchField(fields[1], t.Hour(), 0, 23) &&
+		matchField(fields[2], t.Day(), 1, 31) &&
+		matchField(fields[3], int(t.Month()), 1, 12) &&
+		(matchField(fields[4], dowVal, 0, 6) || (dowVal == 0 && matchField(fields[4], 7, 0, 7)))
+}
+
+func CalculateNextCron(cronExpr string, from time.Time) (time.Time, error) {
+	fields := strings.Fields(cronExpr)
+	if len(fields) != 5 {
+		return time.Time{}, fmt.Errorf("cron expression must have exactly 5 fields")
+	}
+
+	t := from.Truncate(time.Minute).Add(time.Minute)
+	maxSearch := from.AddDate(2, 0, 0)
+	for t.Before(maxSearch) {
+		if matchCron(fields, t) {
+			return t, nil
+		}
+		t = t.Add(time.Minute)
+	}
+	return time.Time{}, fmt.Errorf("no match found in 2 years")
 }
 
 func generateTraceID() string {

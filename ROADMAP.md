@@ -20,8 +20,8 @@ This roadmap outlines the planned development phases for the ServCron distribute
 - [x] **OTel Tracing Integration**: Spans emitted on task execution.
 
 ## Phase 2: Cron Pattern Parsing (Q3 2026)
-- [ ] **Standard Cron Syntax**: Integrate native parsing for 5-field cron specifications (e.g. `0 9 * * 1-5` for weekdays at 9 AM).
-- [ ] **Dynamic Load Balancing**: Distribute different jobs across different nodes rather than executing all jobs on a single leader.
+- [x] **Standard Cron Syntax**: Integrate native parsing for 5-field cron specifications (e.g. `0 9 * * 1-5` for weekdays at 9 AM).
+- [x] **Dynamic Load Balancing**: Distribute different jobs across different nodes rather than executing all jobs on a single leader.
 
 ## Phase 3: ServStore Backing (Q4 2026)
 - [ ] **Persistent Job Registry**: Back job state persistence to a `ServStore` S3 bucket, preventing scheduled task losses during server crashes or restarts.

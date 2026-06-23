@@ -49,7 +49,7 @@ func main() {
 
 	// Initialize components
 	elector := cron.NewLeaderElector(*redisURL, *lockKey, *leaseDur)
-	scheduler := cron.NewScheduler(elector.IsLeader)
+	scheduler := cron.NewScheduler(elector.AcquireJobLock)
 	srv := server.NewServer(scheduler, elector)
 
 	// Start components
