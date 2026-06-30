@@ -39,3 +39,10 @@ This roadmap outlines the planned development phases for the ServCron distribute
 - [ ] **Cron Expression Builder UI**: Visual cron builder in ServConsole with next-5-runs preview.
 
 > **Note:** For long-running, stateful, multi-day workflows with human approval gates and saga compensation, see **ServFlow** — the proposed workflow orchestrator. ServCron Phase 4 focuses on short-lived DAG job pipelines (minutes), while ServFlow handles durable workflows (hours/days) with state checkpointing. They integrate via ServQueue: ServCron can trigger ServFlow workflows on schedule, and ServFlow steps can schedule follow-up jobs in ServCron.
+
+## Phase 5: Architectural Depth & DevOps (Pending)
+- [ ] **`serv cron list` CLI** — Terminal command showing next 5 scheduled runs per job, last outcome, and failure count — invaluable for on-call debugging (DevOps)
+- [ ] **Job Run Dry-Mode** — `serv cron run --dry-run <job>` executes a job with verbose logging but without side effects; uses request mocking for HTTP tasks (DX)
+- [ ] **Structured Job Output Logs** — Persist structured JSON stdout/stderr per run to ServStore with trace_id linkage; surface in ServConsole and searchable via ServTrace (DX / Observability)
+
+> See [UNIFIED_ROADMAP.md](../UNIFIED_ROADMAP.md) for the full ecosystem priority matrix and architectural recommendations.
