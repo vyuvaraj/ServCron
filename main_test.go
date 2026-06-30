@@ -406,3 +406,20 @@ func TestS3PersistenceAndAuditLog(t *testing.T) {
 	}
 }
 
+func BenchmarkCronNextCalculation(b *testing.B) {
+	// Typical cron expressions of varying complexity
+	exprs := []string{
+		"* * * * *",       // every minute
+		"0 9 * * 1-5",    // weekdays at 9am
+		"*/15 * * * *",   // every 15 minutes
+		"0 0 1 * *",      // first of each month
+		"30 18 * * 5",    // friday 6:30pm
+	}
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		expr := exprs[i%len(exprs)]
+		_, _ = cron.CalculateNextCron(expr, from)
+	}
+}
+
