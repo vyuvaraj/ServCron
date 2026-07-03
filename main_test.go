@@ -423,3 +423,39 @@ func BenchmarkCronNextCalculation(b *testing.B) {
 	}
 }
 
+func TestSchedulerOutcomeTracking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	sched := cron.NewScheduler(func(string, time.Time) bool { return true })
+	sched.CheckInterval = 50 * time.Millisecond
+	job := &cron.Job{
+		ID:        "outcome-job",
+		Interval:  "50ms",
+		TargetURL: server.URL,
+	}
+
+	err := sched.AddJob(job)
+	if err != nil {
+		t.Fatalf("Failed to add job: %v", err)
+	}
+
+	sched.Start()
+	time.Sleep(300 * time.Millisecond)
+	sched.Stop()
+
+	jobs := sched.GetJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("Expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].LastOutcome != "success" {
+		t.Errorf("Expected LastOutcome to be 'success', got %s", jobs[0].LastOutcome)
+	}
+	if jobs[0].FailureCount != 0 {
+		t.Errorf("Expected FailureCount to be 0, got %d", jobs[0].FailureCount)
+	}
+}
+

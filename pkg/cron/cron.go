@@ -19,15 +19,17 @@ import (
 )
 
 type Job struct {
-	ID        string    `json:"id"`
-	Interval  string    `json:"interval,omitempty"`  // duration string e.g. "10s", "1m"
-	Cron      string    `json:"cron,omitempty"`      // standard 5-field cron e.g. "0 9 * * 1-5"
-	TargetURL string    `json:"target_url"`
-	Payload   string    `json:"payload,omitempty"`
-	NextTopic string    `json:"next_topic,omitempty"`
-	NextRun   time.Time `json:"next_run"`
-	LastRun   time.Time `json:"last_run,omitempty"`
-	Status    string    `json:"status"`              // "active", "paused"
+	ID           string    `json:"id"`
+	Interval     string    `json:"interval,omitempty"`  // duration string e.g. "10s", "1m"
+	Cron         string    `json:"cron,omitempty"`      // standard 5-field cron e.g. "0 9 * * 1-5"
+	TargetURL    string    `json:"target_url"`
+	Payload      string    `json:"payload,omitempty"`
+	NextTopic    string    `json:"next_topic,omitempty"`
+	NextRun      time.Time `json:"next_run"`
+	LastRun      time.Time `json:"last_run,omitempty"`
+	Status       string    `json:"status"`              // "active", "paused"
+	LastOutcome  string    `json:"last_outcome,omitempty"`
+	FailureCount int       `json:"failure_count"`
 }
 
 type JobAuditLog struct {
@@ -373,6 +375,19 @@ func (s *Scheduler) executeJob(job *Job) {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		respBody = string(bodyBytes)
 	}
+
+	s.mu.Lock()
+	if j, exists := s.jobs[job.ID]; exists {
+		j.LastRun = startTime
+		if err != nil || statusCode < 200 || statusCode >= 300 {
+			j.LastOutcome = "failed"
+			j.FailureCount++
+		} else {
+			j.LastOutcome = "success"
+			j.FailureCount = 0
+		}
+	}
+	s.mu.Unlock()
 
 	ServShared.EndSpan(&span, err, attrs)
 	go s.saveAuditLogToS3(job.ID, startTime, duration, statusCode, errStr, respBody)

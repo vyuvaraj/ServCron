@@ -25,6 +25,7 @@ func NewServer(scheduler *cron.Scheduler, elector *cron.LeaderElector) *Server {
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", ServShared.HealthzHandler)
 	mux.HandleFunc("/readyz", ServShared.ReadyzHandler)
+	mux.HandleFunc("/api/version", ServShared.VersionHandler("servcron", "1.0.0"))
 	mux.HandleFunc("/health", s.handleHealth)
 
 	mux.HandleFunc("/api/jobs", s.handleJobsCollection)
