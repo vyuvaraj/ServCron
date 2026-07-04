@@ -1,4 +1,4 @@
-project_name: servcron
+﻿project_name: servcron
 version: 2
 
 before:
@@ -47,7 +47,7 @@ dockers:
   - image_templates:
       - "ghcr.io/vyuvaraj/servcron:{{.Tag}}"
       - "ghcr.io/vyuvaraj/servcron:latest"
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.goreleaser
     build_flag_templates:
       - "--label=org.opencontainers.image.title=ServCron"
       - "--label=org.opencontainers.image.version={{.Version}}"
