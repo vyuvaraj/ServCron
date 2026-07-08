@@ -30,6 +30,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("/api/jobs", s.handleJobsCollection)
 	mux.HandleFunc("/api/v1/jobs", s.handleJobsCollection)
+	mux.HandleFunc("/api/cron/smart-schedule", s.handleSmartSchedule)
+	mux.HandleFunc("/api/v1/cron/smart-schedule", s.handleSmartSchedule)
 
 	// Since we are using standard ServeMux, we can parse job IDs from path suffix
 	mux.HandleFunc("/api/jobs/", s.handleJobsItem)
@@ -103,6 +105,16 @@ func (s *Server) listJobs(w http.ResponseWriter, _ *http.Request) {
 	jobs := s.scheduler.GetJobs()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(jobs)
+}
+
+func (s *Server) handleSmartSchedule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		WriteJSONError(w, r, "Method not allowed", "ERR_METHOD_NOT_ALLOWED", http.StatusMethodNotAllowed)
+		return
+	}
+	suggestions := s.scheduler.AnalyzeSchedules()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(suggestions)
 }
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
