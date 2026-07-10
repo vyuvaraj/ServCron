@@ -42,12 +42,20 @@ func main() {
 
 	log.Printf("Starting ServCron service on %s...", *addr)
 
+	standalone := ServShared.IsStandalone()
+	if standalone {
+		log.Println("ServCron: Running in standalone mode. Tracing disabled. Leader election runs in single-node mode.")
+		*redisURL = ""
+	}
+
 	// Initialize tracing
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	otel.InitTrace(ctx, "servcron")
-	defer otel.Shutdown(context.Background())
+	if !standalone {
+		otel.InitTrace(ctx, "servcron")
+		defer otel.Shutdown(context.Background())
+	}
 
 	// Initialize components
 	elector := cron.NewLeaderElector(*redisURL, *lockKey, *leaseDur)
