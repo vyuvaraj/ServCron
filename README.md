@@ -1,5 +1,9 @@
 # ServCron
 
+```bash
+docker run -p 8085:8085 ghcr.io/vyuvaraj/servcron:latest
+```
+
 ServCron is the distributed scheduling service for the Servverse ecosystem. It coordinates and executes scheduled tasks configured via `every` or `cron` declarations with distributed leader election, exactly-once scheduling semantics, and automatic S3-compatible persistence.
 
 ## Features
