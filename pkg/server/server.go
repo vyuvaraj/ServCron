@@ -16,10 +16,10 @@ var (
 
 type Server struct {
 	scheduler *cron.Scheduler
-	elector   *cron.LeaderElector
+	elector   cron.LeaderElectionProvider
 }
 
-func NewServer(scheduler *cron.Scheduler, elector *cron.LeaderElector) *Server {
+func NewServer(scheduler *cron.Scheduler, elector cron.LeaderElectionProvider) *Server {
 	return &Server{
 		scheduler: scheduler,
 		elector:   elector,

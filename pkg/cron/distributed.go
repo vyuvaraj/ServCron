@@ -12,6 +12,25 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// LeaderElectionProvider defines dynamic hooks for leader election and task slot locking.
+type LeaderElectionProvider interface {
+	Start()
+	Stop()
+	IsLeader() bool
+	AcquireJobLock(jobID string, nextRun time.Time) bool
+}
+
+// ActiveLeaderElectionProvider is the globally registered leader election provider.
+var ActiveLeaderElectionProvider LeaderElectionProvider
+
+// StandaloneLeader is the default fallback provider for OSS (always runs as leader).
+type StandaloneLeader struct{}
+
+func (s *StandaloneLeader) Start()                                                    {}
+func (s *StandaloneLeader) Stop()                                                     {}
+func (s *StandaloneLeader) IsLeader() bool                                            { return true }
+func (s *StandaloneLeader) AcquireJobLock(jobID string, nextRun time.Time) bool       { return true }
+
 type LeaderElector struct {
 	mu            sync.Mutex
 	redisClient   *redis.Client
@@ -23,18 +42,25 @@ type LeaderElector struct {
 	wg            sync.WaitGroup
 }
 
-func NewLeaderElector(redisURL string, lockKey string, leaseDuration time.Duration) *LeaderElector {
-	var rdb *redis.Client
-	if redisURL != "" {
-		opt, err := redis.ParseURL(redisURL)
-		if err == nil {
-			rdb = redis.NewClient(opt)
-		} else {
-			log.Printf("Warning: failed to parse redis URL: %v. Running in standalone leader mode.", err)
-		}
+func NewLeaderElector(redisURL string, lockKey string, leaseDuration time.Duration) LeaderElectionProvider {
+	if ActiveLeaderElectionProvider != nil {
+		return ActiveLeaderElectionProvider
 	}
 
-	// Generate random node ID
+	// In the OSS core build, if no Redis URL is provided, we use the standalone engine directly
+	if redisURL == "" {
+		return &StandaloneLeader{}
+	}
+
+	var rdb *redis.Client
+	opt, err := redis.ParseURL(redisURL)
+	if err == nil {
+		rdb = redis.NewClient(opt)
+	} else {
+		log.Printf("Warning: failed to parse redis URL: %v. Running in standalone leader mode.", err)
+		return &StandaloneLeader{}
+	}
+
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	nodeID := hex.EncodeToString(b)
@@ -66,7 +92,6 @@ func (le *LeaderElector) Stop() {
 	close(le.stopChan)
 	le.wg.Wait()
 
-	// Try release lock if leader
 	le.mu.Lock()
 	if le.isLeader {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
@@ -88,7 +113,6 @@ func (le *LeaderElector) electionLoop() {
 	ticker := time.NewTicker(le.leaseDuration / 3)
 	defer ticker.Stop()
 
-	// Initial attempt
 	le.tryAcquireOrRenew()
 
 	for {
@@ -109,14 +133,12 @@ func (le *LeaderElector) tryAcquireOrRenew() {
 	defer le.mu.Unlock()
 
 	if le.isLeader {
-		// Renew lease
 		ok, err := le.redisClient.Expire(ctx, le.lockKey, le.leaseDuration).Result()
 		if err != nil || !ok {
 			log.Printf("Node %s: Failed to renew leader lease. Stepping down: %v", le.nodeID, err)
 			le.isLeader = false
 		}
 	} else {
-		// Try acquire lock
 		ok, err := le.redisClient.SetNX(ctx, le.lockKey, le.nodeID, le.leaseDuration).Result()
 		if err != nil {
 			log.Printf("Node %s: Error acquiring lock: %v", le.nodeID, err)
