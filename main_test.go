@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -257,11 +258,14 @@ func TestCronSyntaxParsing(t *testing.T) {
 }
 
 func TestDynamicLoadBalancing(t *testing.T) {
-	// Mock shared lock store
+	// Mock shared lock store with mutex to prevent concurrent map writes
+	var mu sync.Mutex
 	locks := make(map[string]string) // slotKey -> nodeID
 	
 	acquireLockMock := func(nodeID string) func(string, time.Time) bool {
 		return func(jobID string, nextRun time.Time) bool {
+			mu.Lock()
+			defer mu.Unlock()
 			slotKey := fmt.Sprintf("%s:%d", jobID, nextRun.Unix())
 			if _, exists := locks[slotKey]; exists {
 				return false
