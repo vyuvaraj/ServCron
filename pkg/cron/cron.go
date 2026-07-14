@@ -563,14 +563,56 @@ func matchField(field string, val int, minVal, maxVal int) bool {
 	return false
 }
 
+func isNearestWeekday(t time.Time, targetDay int) bool {
+	targetDate := time.Date(t.Year(), t.Month(), targetDay, 0, 0, 0, 0, t.Location())
+	wd := targetDate.Weekday()
+	var nearestDate time.Time
+	if wd == time.Saturday {
+		if targetDay == 1 {
+			nearestDate = targetDate.AddDate(0, 0, 2)
+		} else {
+			nearestDate = targetDate.AddDate(0, 0, -1)
+		}
+	} else if wd == time.Sunday {
+		lastDay := time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, t.Location()).Day()
+		if targetDay == lastDay {
+			nearestDate = targetDate.AddDate(0, 0, -2)
+		} else {
+			nearestDate = targetDate.AddDate(0, 0, 1)
+		}
+	} else {
+		nearestDate = targetDate
+	}
+	return t.Year() == nearestDate.Year() && t.Month() == nearestDate.Month() && t.Day() == nearestDate.Day()
+}
+
 func matchCron(fields []string, t time.Time) bool {
 	if len(fields) != 5 {
 		return false
 	}
+	dayField := fields[2]
+	var dayMatch bool
+	if dayField == "L" {
+		dayMatch = (t.AddDate(0, 0, 1).Day() == 1)
+	} else if strings.HasSuffix(dayField, "W") {
+		targetDayStr := strings.TrimSuffix(dayField, "W")
+		targetDay := 1
+		if targetDayStr != "" {
+			if val, err := strconv.Atoi(targetDayStr); err == nil {
+				targetDay = val
+			}
+		} else {
+			targetDay = t.Day()
+		}
+		dayMatch = isNearestWeekday(t, targetDay)
+	} else {
+		dayMatch = matchField(dayField, t.Day(), 1, 31)
+	}
+
 	dowVal := int(t.Weekday())
 	return matchField(fields[0], t.Minute(), 0, 59) &&
 		matchField(fields[1], t.Hour(), 0, 23) &&
-		matchField(fields[2], t.Day(), 1, 31) &&
+		dayMatch &&
 		matchField(fields[3], int(t.Month()), 1, 12) &&
 		(matchField(fields[4], dowVal, 0, 6) || (dowVal == 0 && matchField(fields[4], 7, 0, 7)))
 }
