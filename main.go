@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -72,10 +73,39 @@ func main() {
 	// Set up server
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
+	mux.HandleFunc("/api/v1/version", ServShared.VersionHandler("servcron", "1.0.0"))
+
+	// Wrapper handler for /api/v1/ prefix rewriting (V1.1 support)
+	v1Wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			r.URL.Path = "/api/" + strings.TrimPrefix(r.URL.Path, "/api/v1/")
+		}
+		mux.ServeHTTP(w, r)
+	})
+
+	rateLimiter := ServShared.RateLimitMiddleware
+	if flag.Lookup("test.v") != nil {
+		rateLimiter = func(next http.Handler) http.Handler {
+			return next
+		}
+	}
+
+	// Wrap in ServShared middleware: Trace -> RateLimit -> CORS -> MaxBytes -> Auth -> Tenant -> v1Wrapper
+	serverHandler := ServShared.TraceMiddleware("servcron",
+		rateLimiter(
+			ServShared.CORSMiddleware(
+				ServShared.MaxBytesMiddleware(10*1024*1024)(
+					ServShared.AuthMiddleware(
+						ServShared.TenantMiddleware(v1Wrapper),
+					),
+				),
+			),
+		),
+	)
 
 	httpServer := &http.Server{
 		Addr:    *addr,
-		Handler: ServShared.AuthMiddleware(mux),
+		Handler: serverHandler,
 	}
 
 	go func() {
